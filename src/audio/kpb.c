@@ -81,9 +81,9 @@ static void kpb_drain_samples(void *source, struct comp_buffer *sink,
 static void kpb_buffer_samples(struct comp_buffer *source, uint32_t start,
 			       void *sink, size_t size, size_t sample_width);
 static void kpb_reset_history_buffer(struct hb *buff);
-static inline bool validate_host_params(size_t host_period_size,
-					size_t host_buffer_size,
-					size_t bytes_per_ms);
+static inline bool validate_host_params(struct comp_data *kpb,
+					size_t host_period_size,
+					size_t host_buffer_size);
 static inline void kpb_change_state(struct comp_data *kpb,
 				    enum kpb_state state);
 
@@ -1322,26 +1322,38 @@ static void kpb_reset_history_buffer(struct hb *buff)
 	} while (buff != first_buff);
 }
 
-static inline bool validate_host_params(size_t host_period_size,
-					size_t host_buffer_size,
-					size_t bytes_per_ms)
+static inline bool validate_host_params(struct comp_data *kpb,
+					size_t host_period_size,
+					size_t host_buffer_size)
 {
-	/* Check host period size sanity.
-	 * Here we check if host period size (which defines interval
-	 * time) will allow us to drain more data then the interval
-	 * takes - as only such condition guarantees draining will end.
-	 * The formula:
-	 *	drained_data_in_one_interval_ms > interval_break_ms
-	 * where:
-	 * drained_data_in_one_interval_ms = (host_period_size * 2) [ms]
-	 * interval_break_ms = host_period_size / bytes_per_ms [ms]
+	/* The aim of this function is to perform basic check of host params
+	 * and reject them if they won't allow for stable draining.
+	 * Note however that this is highly recommended for host buffer to
+	 * be of history buffer size. This will quarantee "safe" draining.
+	 * By safe we mean no XRUNs(host was unable to read data on time),
+	 * or lose of data due to host delayed read. The later condition
+	 * is very likely after wake up from power state like d0ix.
 	 */
 
-	if (host_period_size < bytes_per_ms || /* Out of control */
-	    host_period_size >= (host_buffer_size / 2)) /* XRUN */
-		return false;
+	size_t kpb_hb_size = KPB_MAX_BUFFER_SIZE(kpb->config.sampling_width);
 
-	return true;
+	if (host_period_size == 0 || host_buffer_size == 0) {
+		/* Wrong host params */
+		return false;
+	} else if (host_buffer_size > kpb_hb_size) {
+		/* Host buffer is big enough, we don't have to
+		 * control draining speed.
+		 */
+		return true;
+	} else if (host_buffer_size <= (host_period_size * 2)) {
+		/* XRUN condition - in synchronized draining we copy two
+		 * periods and wait one. Therefore if copied data is equal
+		 * to whole buffer size XRUN will occur on host side.
+		 */
+		return false;
+	} else {
+		return true;
+	}
 }
 
 /**
